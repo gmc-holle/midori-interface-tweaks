@@ -21,7 +21,12 @@ static void _it_on_activate(MidoriExtension *inExtension, MidoriApp *inApp, gpoi
 	g_return_if_fail(it==NULL);
 
 	it=interface_tweaks_new(inExtension, inApp);
-	// TODO: g_object_set(it, "ask-for-unknown-policy", midori_extension_get_boolean(inExtension, "ask-for-unknown-policy"), NULL);
+	g_object_set(it,
+					"group-minimized-tabs", midori_extension_get_boolean(inExtension, "group-minimized-tabs"),
+					"hide-close-on-minimized-tabs", midori_extension_get_boolean(inExtension, "hide-close-on-minimized-tabs"),
+					"show-start-request-throbber", midori_extension_get_boolean(inExtension, "show-start-request-throbber"),
+					"small-toolbar", midori_extension_get_boolean(inExtension, "small-toolbar"),
+					NULL);
 }
 
 /* This extension was deactivated */
@@ -65,7 +70,10 @@ MidoriExtension *extension_init(void)
 												"authors", "Stephan Haller <nomad@froevel.de>",
 												NULL);
 
-	// TODO: midori_extension_install_boolean(extension, "ask-for-unknown-policy", TRUE);
+	midori_extension_install_boolean(extension, "group-minimized-tabs", FALSE);
+	midori_extension_install_boolean(extension, "hide-close-on-minimized-tabs", FALSE);
+	midori_extension_install_boolean(extension, "show-start-request-throbber", FALSE);
+	midori_extension_install_boolean(extension, "small-toolbar", FALSE);
 
 	g_signal_connect(extension, "activate", G_CALLBACK(_it_on_activate), NULL);
 	g_signal_connect(extension, "deactivate", G_CALLBACK(_it_on_deactivate), NULL);

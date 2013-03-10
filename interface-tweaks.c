@@ -9,9 +9,6 @@
  See the file COPYING for the full license text.
 */
 
-/* Remove next line if preferences window is implemented and set default to FALSE */
-#define DEFAULT_SETTING TRUE
-
 #include "interface-tweaks.h"
 
 /* Define this class in GObject system */
@@ -393,6 +390,7 @@ static void _interface_tweaks_on_group_minimized_tabs_changed(InterfaceTweaks *s
 	{
 		/* Change property */
 		priv->groupMinimizedTabs=inValue;
+		if(priv->inited) midori_extension_set_boolean(priv->extension, "group-minimized-tabs", priv->groupMinimizedTabs);
 
 		/* Move minimized tabs in all browsers to front if activated */
 		if(priv->groupMinimizedTabs)
@@ -450,6 +448,7 @@ static void _interface_tweaks_on_hide_close_on_minimized_tabs_changed(InterfaceT
 	{
 		/* Change property */
 		priv->hideCloseOnMinimizedTabs=inValue;
+		if(priv->inited) midori_extension_set_boolean(priv->extension, "hide-close-on-minimized-tabs", priv->hideCloseOnMinimizedTabs);
 
 		/* Apply new value to all tabs in all browsers */
 		browsers=midori_app_get_browsers(priv->application);
@@ -479,8 +478,11 @@ static void _interface_tweaks_on_show_start_request_throbber_changed(InterfaceTw
 	/* If value changed set it and emit notification of property change */
 	if(priv->showStartRequestThrobber!=inValue || !priv->inited)
 	{
+		/* Change property */
 		priv->showStartRequestThrobber=inValue;
+		if(priv->inited) midori_extension_set_boolean(priv->extension, "show-start-request-throbber", priv->showStartRequestThrobber);
 
+		/* Notify about property change */
 		g_object_notify_by_pspec(G_OBJECT(self), InterfaceTweaksProperties[PROP_SHOW_START_REQUEST_THROBBER]);
 	}
 }
@@ -495,7 +497,9 @@ static void _interface_tweaks_on_small_toolbar_changed(InterfaceTweaks *self, gb
 	/* If value changed set it and emit notification of property change */
 	if(priv->smallToolbar!=inValue || !priv->inited)
 	{
+		/* Change property */
 		priv->smallToolbar=inValue;
+		if(priv->inited) midori_extension_set_boolean(priv->extension, "small-toolbar", priv->smallToolbar);
 
 		/* If small toolbar should be displayed remember current settings */
 		if(inValue==TRUE)
@@ -515,13 +519,17 @@ static void _interface_tweaks_on_small_toolbar_changed(InterfaceTweaks *self, gb
 			/* Otherwise restore old settings */
 			else
 			{
-				/* Set old toolbar values */
-				g_object_set(gtk_settings_get_default(),
-								"gtk-toolbar-icon-size", priv->originToolbarIconSize,
-								"gtk-toolbar-style", priv->originToolbarStyle,
-								NULL);
+				if(priv->inited==TRUE)
+				{
+					/* Set old toolbar values */
+					g_object_set(gtk_settings_get_default(),
+									"gtk-toolbar-icon-size", priv->originToolbarIconSize,
+									"gtk-toolbar-style", priv->originToolbarStyle,
+									NULL);
+				}
 			}
 
+		/* Notify about property change */
 		g_object_notify_by_pspec(G_OBJECT(self), InterfaceTweaksProperties[PROP_SMALL_TOOLBAR]);
 	}
 }
@@ -749,14 +757,14 @@ static void interface_tweaks_class_init(InterfaceTweaksClass *klass)
 		g_param_spec_boolean("group-minimized-tabs",
 								_("Group minimized tabs"),
 								_("If true this extension groups minimized tabs to front."),
-								DEFAULT_SETTING,
+								FALSE,
 								G_PARAM_READWRITE | G_PARAM_CONSTRUCT);
 
 	InterfaceTweaksProperties[PROP_HIDE_CLOSE_ON_MINIMIZED_TABS]=
 		g_param_spec_boolean("hide-close-on-minimized-tabs",
 								_("Hide close on minimized tabs"),
 								_("If true this extension hides the close button on minized tabs."),
-								DEFAULT_SETTING,
+								FALSE,
 								G_PARAM_READWRITE | G_PARAM_CONSTRUCT);
 
 	InterfaceTweaksProperties[PROP_SHOW_START_REQUEST_THROBBER]=
@@ -764,14 +772,14 @@ static void interface_tweaks_class_init(InterfaceTweaksClass *klass)
 								_("Show start-request throbber"),
 								_("If true this extension shows a throbber when a request was started "
 								  "which will be replaced with Midori's standard throbber as soon as data is loaded."),
-								DEFAULT_SETTING,
+								FALSE,
 								G_PARAM_READWRITE | G_PARAM_CONSTRUCT);
 
 	InterfaceTweaksProperties[PROP_SMALL_TOOLBAR]=
 		g_param_spec_boolean("small-toolbar",
 								_("Small toolbar"),
 								_("If true this extension will make toolbar smaller in size."),
-								DEFAULT_SETTING,
+								FALSE,
 								G_PARAM_READWRITE | G_PARAM_CONSTRUCT);
 
 	g_object_class_install_properties(gobjectClass, PROP_LAST, InterfaceTweaksProperties);
@@ -788,10 +796,14 @@ static void interface_tweaks_init(InterfaceTweaks *self)
 
 	/* Set up default values */
 	priv->inited=FALSE;
-	priv->groupMinimizedTabs=DEFAULT_SETTING;
-	priv->hideCloseOnMinimizedTabs=DEFAULT_SETTING;
-	priv->showStartRequestThrobber=DEFAULT_SETTING;
-	priv->smallToolbar=DEFAULT_SETTING;
+
+	priv->groupMinimizedTabs=FALSE;
+	priv->hideCloseOnMinimizedTabs=FALSE;
+	priv->showStartRequestThrobber=FALSE;
+	priv->smallToolbar=FALSE;
+
+	priv->originToolbarIconSize=GTK_ICON_SIZE_INVALID;
+	priv->originToolbarStyle=GTK_TOOLBAR_BOTH;
 }
 
 /* Implementation: Public API */
