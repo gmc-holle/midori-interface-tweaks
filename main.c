@@ -26,6 +26,7 @@ static void _it_on_activate(MidoriExtension *inExtension, MidoriApp *inApp, gpoi
 					"hide-close-on-minimized-tabs", midori_extension_get_boolean(inExtension, "hide-close-on-minimized-tabs"),
 					"show-start-request-throbber", midori_extension_get_boolean(inExtension, "show-start-request-throbber"),
 					"small-toolbar", midori_extension_get_boolean(inExtension, "small-toolbar"),
+					"autocomplete-locationbar", midori_extension_get_boolean(inExtension, "autocomplete-locationbar"),
 					NULL);
 }
 
@@ -74,6 +75,7 @@ MidoriExtension *extension_init(void)
 	midori_extension_install_boolean(extension, "hide-close-on-minimized-tabs", FALSE);
 	midori_extension_install_boolean(extension, "show-start-request-throbber", FALSE);
 	midori_extension_install_boolean(extension, "small-toolbar", FALSE);
+	midori_extension_install_boolean(extension, "autocomplete-locationbar", FALSE);
 
 	g_signal_connect(extension, "activate", G_CALLBACK(_it_on_activate), NULL);
 	g_signal_connect(extension, "deactivate", G_CALLBACK(_it_on_deactivate), NULL);

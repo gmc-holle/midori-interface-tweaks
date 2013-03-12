@@ -11,6 +11,10 @@
 
 #include "interface-tweaks.h"
 
+#define MYTYPENAME(obj) ((obj) ? G_OBJECT_TYPE_NAME((obj)) : "<nil>")
+
+#define HISTORY_DATABASE_FILENAME	"history.db"
+
 /* Define this class in GObject system */
 G_DEFINE_TYPE(InterfaceTweaks,
 				interface_tweaks,
@@ -28,6 +32,7 @@ enum
 	PROP_HIDE_CLOSE_ON_MINIMIZED_TABS,
 	PROP_SHOW_START_REQUEST_THROBBER,
 	PROP_SMALL_TOOLBAR,
+	PROP_AUTOCOMPLETE_LOCATIONBAR,
 
 	PROP_LAST
 };
@@ -47,6 +52,7 @@ struct _InterfaceTweaksPrivate
 	gboolean			hideCloseOnMinimizedTabs;
 	gboolean			showStartRequestThrobber;
 	gboolean			smallToolbar;
+	gboolean			autocompleteLocationbar;
 
 	/* Initialization state */
 	gboolean			inited;
@@ -54,9 +60,69 @@ struct _InterfaceTweaksPrivate
 	/* Additional values */
 	GtkIconSize			originToolbarIconSize;
 	GtkToolbarStyle		originToolbarStyle;
+	sqlite3				*historyDb;
 };
 
+typedef struct
+{
+	GtkAction			*action;
+	GtkWidget			*widget;
+} InterfaceTweaksLocationbarLookup;
+
 /* IMPLEMENTATION: Private variables and methods */
+
+/* Unblock all signal handlers in list retrieved when blocking them in
+ * _interface_tweaks_block_all_handlers()
+ */
+static void _interface_tweaks_unblock_handlers(GObject *inObject, GSList *inHandlers)
+{
+	/* Iterate through list of signal handler IDs and unblock them in object instance */
+	while(inHandlers)
+	{
+		g_signal_handler_unblock(inObject, GPOINTER_TO_SIZE(inHandlers->data));
+		inHandlers=inHandlers->next;
+	}
+}
+
+/* Block all unblocked signal handlers connect to signal ID in object instance.
+ * Returns a list of all signal handlers block to get them unblocked again in
+ * _interface_tweaks_unblock_handlers()
+ */
+static GSList* _interface_tweaks_block_all_handlers(GObject *inObject, guint inSignalID)
+{
+	gulong		handlerID;
+	GSList		*blockedHandlers=NULL;
+
+	/* Block unblocked signal handlers and keep a list of them */
+	do
+	{
+		/* Find unblocked signal handler to signal ID in object instance.
+		 * This will always the next one as the previous one has blocked
+		 * or 0L if all signal handlers were blocked.
+		 */
+		handlerID=g_signal_handler_find(	inObject,
+											G_SIGNAL_MATCH_ID | G_SIGNAL_MATCH_UNBLOCKED,
+											inSignalID,
+											0,
+											NULL,
+											NULL,
+											NULL);
+
+		/* Check if we found an unblocked signal handler */
+		if(handlerID!=0L)
+		{
+			/* Add its signal handler ID to list to signal handlers blocked by us */
+			blockedHandlers=g_slist_prepend(blockedHandlers, GSIZE_TO_POINTER(handlerID));
+
+			/* Block signal */
+			g_signal_handler_block(inObject, handlerID);
+		}
+	}
+	while(handlerID!=0);
+
+	/* Return list of block signal handlers */
+	return(blockedHandlers);
+}
 
 /* Find position of first maximized tab of browser.
  * Returns -1 if position could not determined.
@@ -88,6 +154,82 @@ static gint _interface_tweak_get_browser_first_maximized_tab_position(MidoriBrow
 	g_list_free(tabs);
 
 	return(position);
+}
+
+/* Find locationbar of browser (and entry of locationbar) */
+static void _interface_tweaks_find_browser_locationbar_entry_callback(GtkWidget *inWidget, gpointer inUserData)
+{
+	g_return_if_fail(GTK_IS_WIDGET(inWidget));
+
+	if(GTK_IS_ENTRY(inWidget))
+	{
+		InterfaceTweaksLocationbarLookup	**item=(InterfaceTweaksLocationbarLookup**)inUserData;
+	
+		if(item) (*item)->widget=inWidget;
+	}
+		else if(GTK_IS_CONTAINER(inWidget))
+		{
+			gtk_container_foreach(GTK_CONTAINER(inWidget), _interface_tweaks_find_browser_locationbar_entry_callback, inUserData);
+		}
+}
+
+static void _interface_tweaks_find_browser_locationbar_callback(GtkWidget *inWidget, gpointer inUserData)
+{
+	g_return_if_fail(GTK_IS_WIDGET(inWidget));
+
+	if(GTK_IS_TOOL_ITEM(inWidget))
+	{
+		GtkAction	*action;
+
+		action=gtk_activatable_get_related_action(GTK_ACTIVATABLE(inWidget));
+		if(g_strcmp0(gtk_action_get_name(action), "Location")==0)
+		{
+			InterfaceTweaksLocationbarLookup	**item=(InterfaceTweaksLocationbarLookup**)inUserData;
+
+			if(item) (*item)->action=action;
+
+			gtk_container_foreach(GTK_CONTAINER(inWidget), _interface_tweaks_find_browser_locationbar_entry_callback, inUserData);
+		}
+			else if(g_strcmp0(gtk_action_get_name(action), "LocationSearch")==0)
+			{
+				InterfaceTweaksLocationbarLookup	**item=(InterfaceTweaksLocationbarLookup**)inUserData;
+				GtkWidget							*locationChild;
+
+				if(item) (*item)->action=action;
+
+				locationChild=midori_paned_action_get_child_by_name(MIDORI_PANED_ACTION(action), "Location");
+				if(locationChild)
+				{
+					gtk_container_foreach(GTK_CONTAINER(locationChild), _interface_tweaks_find_browser_locationbar_entry_callback, inUserData);
+				}
+			}
+	}
+		else if(GTK_IS_CONTAINER(inWidget))
+		{
+			gtk_container_foreach(GTK_CONTAINER(inWidget), _interface_tweaks_find_browser_locationbar_callback, inUserData);
+		}
+}
+
+static void _interface_tweaks_find_browser_locationbar(MidoriBrowser *inBrowser, InterfaceTweaksLocationbarLookup *outResult)
+{
+	g_return_if_fail(MIDORI_IS_BROWSER(inBrowser));
+	g_return_if_fail(outResult);
+
+	GtkToolbar		*navigationbar=NULL;
+
+	g_object_get(inBrowser, "navigationbar", &navigationbar, NULL);
+	if(navigationbar)
+	{
+		outResult->action=NULL;
+		outResult->widget=NULL;
+
+		if(GTK_IS_CONTAINER(navigationbar))
+		{
+			gtk_container_foreach(GTK_CONTAINER(navigationbar), _interface_tweaks_find_browser_locationbar_callback, &outResult);
+		}
+
+		g_object_unref(navigationbar);
+	}
 }
 
 /* Find close button of view */
@@ -150,6 +292,234 @@ static KatzeThrobber* _interface_tweaks_find_view_throbber(MidoriView *inView)
 		else if(GTK_IS_CONTAINER(widget)) gtk_container_foreach(GTK_CONTAINER(widget), _interface_tweaks_find_view_throbber_callback, &throbber);
 
 	return(throbber);
+}
+
+/* Autocompleten in locationbar has found a match */
+static gboolean _interface_tweaks_on_insert_prefix(InterfaceTweaks *self,
+													gchar *inPrefix,
+													gpointer inUserData)
+{
+	g_return_val_if_fail(IS_INTERFACE_TWEAKS(self), FALSE);
+	g_return_val_if_fail(GTK_IS_ENTRY_COMPLETION(inUserData), FALSE);
+
+	InterfaceTweaksPrivate	*priv=self->priv;
+	GtkEntryCompletion		*completion=GTK_ENTRY_COMPLETION(inUserData);
+	GtkEntry				*entry;
+	guint					changedSignalID;
+	const gchar				*text;
+	gint					textLength;
+	GSList					*handlers;
+
+	/* Check if we should auto-complete URIs in locationbar */
+	if(priv->autocompleteLocationbar==FALSE) return(TRUE);
+
+	/* Get entry of completion */
+	entry=GTK_ENTRY(gtk_entry_completion_get_entry(completion));
+
+	/* Get current text (that is before text is set by completion)
+	 * and remember its length
+	 */
+	text=gtk_entry_get_text(entry);
+	textLength=strlen(text);
+
+	/* Get "changed" signal ID */
+	changedSignalID=g_signal_lookup("changed", GTK_TYPE_ENTRY);
+
+	/* Emit "changed" event for all signal handlers as the entry
+	 * still contains the unmodified text.
+	 */
+	g_signal_emit(entry, changedSignalID, 0);
+
+	/* Block all unblocked signal handlers for "changed" signal, update entry text
+	 * to the text of completion and unblock these signal handlers again.
+	 * This way we prevent "changed" signal emissions for completion-text.
+	 */
+	handlers=_interface_tweaks_block_all_handlers(G_OBJECT(entry), changedSignalID);
+
+	gtk_entry_set_text(entry, inPrefix);
+	gtk_editable_select_region(GTK_EDITABLE(entry), textLength, -1);
+
+	_interface_tweaks_unblock_handlers(G_OBJECT(entry), handlers);
+	g_slist_free(handlers);
+
+	/* Tell emission that we handled signal and stop further processing */
+	return(TRUE);
+}
+
+/* A key was pressed in locationbar */
+static gboolean _interface_tweaks_on_key_press_event(GSignalInvocationHint *inHint,
+														guint inNumberParams,
+														const GValue *inParams,
+														gpointer inUserData)
+{
+	g_return_val_if_fail(GTK_IS_ENTRY(inUserData), FALSE);
+
+	GtkEntry				*entry=GTK_ENTRY(inUserData);
+	GtkWidget				*target;
+	GdkEventKey				*event;
+	guint					changedSignalID;
+	GSList					*handlers;
+
+	/* Get target of this event and check if it is for locationbar entry */
+	target=GTK_WIDGET(g_value_get_object(inParams));
+	if(target==GTK_WIDGET(entry))
+	{
+		/* Get key-event data */
+		inParams++;
+		event=(GdkEventKey*)g_value_get_boxed(inParams);
+
+		/* Check if key-event would _not_ add any characters */
+		if(!(gdk_keyval_is_upper(event->keyval)==gdk_keyval_is_lower(event->keyval) &&
+				gdk_unicode_to_keyval(gdk_keyval_to_unicode(event->keyval))!=event->keyval))
+		{
+			/* Get "changed" signal ID */
+			changedSignalID=g_signal_lookup("changed", GTK_TYPE_ENTRY);
+
+			/* Block all unblocked signal handlers for "changed" signal, remove selected
+			 * text region from entry text and unblock these signal handlers again.
+			 * This way we keep Midori's auto-completion working. Otherwise it fetches the
+			 * complete entry text with the text portion in selected text region and adds
+			 * the pressed key to it which results in a completely wrong text for auto-completion.
+			 */
+			handlers=_interface_tweaks_block_all_handlers(G_OBJECT(entry), changedSignalID);
+
+			gtk_editable_delete_selection(GTK_EDITABLE(entry));
+
+			_interface_tweaks_unblock_handlers(G_OBJECT(entry), handlers);
+			g_slist_free(handlers);
+		}
+	}
+
+	return(TRUE);
+}
+
+/* The locationbar entry was destroyed */
+static void _interface_tweaks_on_destroyed(InterfaceTweaks *self, gpointer inUserData)
+{
+	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
+	g_return_if_fail(GTK_IS_ENTRY(inUserData));
+
+	GtkEntry				*entry=GTK_ENTRY(inUserData);
+	guint					keyPressSignalID;
+	gulong					hookID;
+
+	/* Remove emission handler from entry if it exists and stops further callbacks
+	 * to our emission hook for "key-press-event"s
+	 */
+	hookID=GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(entry), "interface-tweaks-hook-id"));
+	if(hookID>0)
+	{
+		keyPressSignalID=g_signal_lookup("key-press-event", GTK_TYPE_ENTRY);
+		g_signal_remove_emission_hook(keyPressSignalID, hookID);
+
+		hookID=0L;
+		g_object_set_data(G_OBJECT(entry), "interface-tweaks-hook-id", GSIZE_TO_POINTER(hookID));
+	}
+}
+
+/* The locationbar entry got focus */
+static void _interface_tweaks_on_activate(InterfaceTweaks *self, GdkEvent *inEvent, gpointer inUserData)
+{
+	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
+	g_return_if_fail(GTK_IS_ENTRY(inUserData));
+
+	InterfaceTweaksPrivate	*priv=self->priv;
+	GtkEntry				*entry=GTK_ENTRY(inUserData);
+	GtkEntryCompletion		*completion;
+	GtkListStore			*model;
+	sqlite3_stmt			*statement=NULL;
+	gint					success;
+	guint					keyPressSignalID;
+	gulong					hookID;
+
+	/* Get completion of entry */
+	completion=gtk_entry_get_completion(entry);
+	if(completion && priv->historyDb)
+	{
+		/* Get model of completion */
+		model=GTK_LIST_STORE(gtk_entry_completion_get_model(completion));
+
+		/* Clear model if available ... */
+		if(model) gtk_list_store_clear(model);
+			/* ... otherwise create new model */
+			else
+			{
+				model=gtk_list_store_new(1, G_TYPE_STRING);
+				gtk_entry_completion_set_model(completion, GTK_TREE_MODEL(model));
+				gtk_entry_completion_set_text_column(completion, 0);
+			}
+
+		/* Fill model with history data */
+		success=sqlite3_prepare_v2(priv->historyDb,
+									"SELECT uri FROM history GROUP BY uri ORDER BY date,uri;", /* Found row should also contain highest date so no ORDER BY */
+									-1,
+									&statement,
+									NULL);
+		if(statement && success==SQLITE_OK)
+		{
+			gchar			*dbURI, *modelURI;
+			GtkTreeIter		iter;
+			SoupURI			*soupURI;
+			GHashTable		*domains;
+
+			/* Create hash-table for URIs to keep track which URIs are added to
+			 * completion list already to avoid duplicates
+			 */
+			domains=g_hash_table_new(g_str_hash, g_str_equal);
+			if(domains)
+			{
+				/* Iterate through URIs found in database by the query above */
+				while(sqlite3_step(statement)==SQLITE_ROW)
+				{
+					/* Get URI from database */
+					dbURI=(gchar*)sqlite3_column_text(statement, 0);
+
+					/* Create SoupURI from URI to retrieve host and/or scheme for completion */
+					soupURI=soup_uri_new(dbURI);
+
+					/* Add URI with scheme and host to completion */
+					modelURI=g_strdup_printf("%s://%s", soup_uri_get_scheme(soupURI), soup_uri_get_host(soupURI));
+					if(g_hash_table_lookup(domains, modelURI)==NULL)
+					{
+						gtk_list_store_append(model, &iter);
+						gtk_list_store_set(model, &iter, 0, modelURI, -1);
+						g_hash_table_insert(domains, modelURI, GINT_TO_POINTER(TRUE));
+					}
+					g_free(modelURI);
+
+					/* Add URI without scheme - only host - to completion */
+					modelURI=g_strdup(soup_uri_get_host(soupURI));
+					if(g_hash_table_lookup(domains, modelURI)==NULL)
+					{
+						gtk_list_store_append(model, &iter);
+						gtk_list_store_set(model, &iter, 0, modelURI, -1);
+						g_hash_table_insert(domains, modelURI, GINT_TO_POINTER(TRUE));
+					}
+					g_free(modelURI);
+
+					/* Release allocated resources */
+					soup_uri_free(soupURI);
+				}
+
+				/* Release allocated resources */
+				g_hash_table_destroy(domains);
+			}
+		}
+			else g_warning(_("Could not fetch history from database: %s"), sqlite3_errmsg(priv->historyDb));
+
+		sqlite3_finalize(statement);
+	}
+
+	/* Add emission handler to entry if it does not exist to ensure that
+	 * our "key-press-event" handler gets called first
+	 */
+	hookID=GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(entry), "interface-tweaks-hook-id"));
+	if(hookID==0)
+	{
+		keyPressSignalID=g_signal_lookup("key-press-event", GTK_TYPE_ENTRY);
+		hookID=g_signal_add_emission_hook(keyPressSignalID, 0, _interface_tweaks_on_key_press_event, entry, NULL);
+		g_object_set_data(G_OBJECT(entry), "interface-tweaks-hook-id", GSIZE_TO_POINTER(hookID)) ;
+	}
 }
 
 /* A tab was minimized (pinned) or maximized (unpinned) - Check for grouping tabs */
@@ -348,8 +718,10 @@ static void _interface_tweaks_on_add_browser(InterfaceTweaks *self, MidoriBrowse
 	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
 	g_return_if_fail(MIDORI_IS_BROWSER(inBrowser));
 
-	GtkNotebook		*notebook;
-	GList			*tabs, *iter;
+	GtkNotebook							*notebook;
+	GList								*tabs, *iter;
+	InterfaceTweaksLocationbarLookup	locationbar;
+	GtkEntryCompletion					*completion;
 
 	/* Set up all current available tabs in browser */
 	tabs=midori_browser_get_tabs(inBrowser);
@@ -369,6 +741,23 @@ static void _interface_tweaks_on_add_browser(InterfaceTweaks *self, MidoriBrowse
 		g_signal_connect_swapped(notebook, "page-added", G_CALLBACK(_interface_tweaks_on_tab_reordered), self);
 		g_signal_connect_swapped(notebook, "page-reordered", G_CALLBACK(_interface_tweaks_on_tab_reordered), self);
 		g_object_unref(notebook);
+	}
+
+	/* Listen to locationbar signals */
+	_interface_tweaks_find_browser_locationbar(inBrowser, &locationbar);
+	if(locationbar.widget)
+	{
+		/* Add completion to location entry and setup signals */
+		completion=gtk_entry_completion_new();
+		gtk_entry_completion_set_inline_completion(completion, TRUE);
+		gtk_entry_completion_set_inline_selection(completion, FALSE);
+		gtk_entry_completion_set_popup_completion(completion, FALSE);
+		gtk_entry_set_completion(GTK_ENTRY(locationbar.widget), completion);
+		g_signal_connect_swapped(completion, "insert-prefix", G_CALLBACK(_interface_tweaks_on_insert_prefix), self);
+		g_object_unref(completion);
+
+		g_signal_connect_swapped(locationbar.widget, "focus-in-event", G_CALLBACK(_interface_tweaks_on_activate), self);
+		g_signal_connect_swapped(locationbar.widget, "destroy", G_CALLBACK(_interface_tweaks_on_destroyed), self);
 	}
 }
 
@@ -534,18 +923,38 @@ static void _interface_tweaks_on_small_toolbar_changed(InterfaceTweaks *self, gb
 	}
 }
 
+/* "autocomplete-locationbar" has changed */
+static void _interface_tweaks_on_autocomplete_locationbar_changed(InterfaceTweaks *self, gboolean inValue)
+{
+	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
+
+	InterfaceTweaksPrivate	*priv=self->priv;
+
+	/* If value changed set it and emit notification of property change */
+	if(priv->autocompleteLocationbar!=inValue || !priv->inited)
+	{
+		/* Change property */
+		priv->autocompleteLocationbar=inValue;
+		if(priv->inited) midori_extension_set_boolean(priv->extension, "autocomplete-locationbar", priv->autocompleteLocationbar);
+
+		/* Notify about property change */
+		g_object_notify_by_pspec(G_OBJECT(self), InterfaceTweaksProperties[PROP_AUTOCOMPLETE_LOCATIONBAR]);
+	}
+}
+
 /* Application property has changed */
 static void _interface_tweaks_on_application_changed(InterfaceTweaks *self, MidoriApp *inApplication)
 {
 	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
 	g_return_if_fail(MIDORI_IS_APP(inApplication));
 
-	InterfaceTweaksPrivate	*priv=INTERFACE_TWEAKS(self)->priv;
-	GtkNotebook				*notebook;
-	MidoriBrowser			*browser;
-	GList					*browsers, *browsersIter;
-	GList					*tabs, *tabsIter;
-	WebKitWebView			*webkitView;
+	InterfaceTweaksPrivate				*priv=INTERFACE_TWEAKS(self)->priv;
+	GtkNotebook							*notebook;
+	MidoriBrowser						*browser;
+	GList								*browsers, *browsersIter;
+	GList								*tabs, *tabsIter;
+	WebKitWebView						*webkitView;
+	InterfaceTweaksLocationbarLookup	locationbar;
 
 	/* Release resources on current application object */
 	if(priv->application)
@@ -574,6 +983,34 @@ static void _interface_tweaks_on_application_changed(InterfaceTweaks *self, Mido
 			{
 				g_signal_handlers_disconnect_by_data(notebook, self);
 				g_object_unref(notebook);
+			}
+
+			_interface_tweaks_find_browser_locationbar(browser, &locationbar);
+			if(locationbar.widget)
+			{
+				GtkEntry				*entry=GTK_ENTRY(locationbar.widget);
+				GtkEntryCompletion		*completion;
+				gulong					hookID;
+				guint					keyPressSignalID;
+
+				g_signal_handlers_disconnect_by_data(entry, self);
+
+				completion=gtk_entry_get_completion(GTK_ENTRY(entry));
+				if(completion)
+				{
+					g_signal_handlers_disconnect_by_data(completion, self);
+					gtk_entry_set_completion(entry, NULL);
+				}
+
+				hookID=GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(entry), "interface-tweaks-hook-id"));
+				if(hookID!=0)
+				{
+					keyPressSignalID=g_signal_lookup("key-press-event", GTK_TYPE_ENTRY);
+					g_signal_remove_emission_hook(keyPressSignalID, hookID);
+
+					hookID=0L;
+					g_object_set_data(G_OBJECT(entry), "interface-tweaks-hook-id", GSIZE_TO_POINTER(hookID));
+				}
 			}
 		}
 		g_list_free(browsers);
@@ -608,10 +1045,18 @@ static void _interface_tweaks_on_extension_changed(InterfaceTweaks *self, Midori
 	g_return_if_fail(MIDORI_IS_EXTENSION(inExtension));
 
 	InterfaceTweaksPrivate	*priv=INTERFACE_TWEAKS(self)->priv;
+	gboolean				dbSuccess;
+	gchar					*dbFilename;
 
 	/* Release resources on current extension object */
 	if(priv->extension)
 	{
+		if(priv->historyDb)
+		{
+			sqlite3_close(priv->historyDb);
+			priv->historyDb=NULL;
+		}
+
 		g_object_unref(priv->extension);
 		priv->extension=NULL;
 	}
@@ -619,6 +1064,21 @@ static void _interface_tweaks_on_extension_changed(InterfaceTweaks *self, Midori
 	/* Set new extension object */
 	if(!inExtension) return;
 	priv->extension=g_object_ref(inExtension);
+
+	/* Open history database */
+	dbFilename=midori_paths_get_config_filename_for_writing(HISTORY_DATABASE_FILENAME);
+	if(dbFilename)
+	{
+		dbSuccess=sqlite3_open_v2(dbFilename, &priv->historyDb, SQLITE_OPEN_READONLY, NULL);
+		if(dbSuccess!=SQLITE_OK)
+		{
+			g_warning(_("Could not open history database: %s"), sqlite3_errmsg(priv->historyDb));
+
+			if(priv->historyDb) sqlite3_close(priv->historyDb);
+			priv->historyDb=NULL;
+		}
+		g_free(dbFilename);
+	}
 
 	/* Notify about property change */
 	g_object_notify_by_pspec(G_OBJECT(self), InterfaceTweaksProperties[PROP_EXTENSION]);
@@ -636,6 +1096,7 @@ static void interface_tweaks_finalize(GObject *inObject)
 	_interface_tweaks_on_hide_close_on_minimized_tabs_changed(self, FALSE);
 	_interface_tweaks_on_show_start_request_throbber_changed(self, FALSE);
 	_interface_tweaks_on_small_toolbar_changed(self, FALSE);
+	_interface_tweaks_on_autocomplete_locationbar_changed(self, FALSE);
 	_interface_tweaks_on_application_changed(self, NULL);
 	_interface_tweaks_on_extension_changed(self, NULL);
 
@@ -678,6 +1139,10 @@ static void interface_tweaks_set_property(GObject *inObject,
 			_interface_tweaks_on_small_toolbar_changed(self, g_value_get_boolean(inValue));
 			break;
 
+		case PROP_AUTOCOMPLETE_LOCATIONBAR:
+			_interface_tweaks_on_autocomplete_locationbar_changed(self, g_value_get_boolean(inValue));
+			break;
+
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID(inObject, inPropID, inSpec);
 			break;
@@ -715,6 +1180,10 @@ static void interface_tweaks_get_property(GObject *inObject,
 
 		case PROP_SMALL_TOOLBAR:
 			g_value_set_boolean(outValue, self->priv->smallToolbar);
+			break;
+
+		case PROP_AUTOCOMPLETE_LOCATIONBAR:
+			g_value_set_boolean(outValue, self->priv->autocompleteLocationbar);
 			break;
 
 		default:
@@ -782,6 +1251,13 @@ static void interface_tweaks_class_init(InterfaceTweaksClass *klass)
 								FALSE,
 								G_PARAM_READWRITE | G_PARAM_CONSTRUCT);
 
+	InterfaceTweaksProperties[PROP_AUTOCOMPLETE_LOCATIONBAR]=
+		g_param_spec_boolean("autocomplete-locationbar",
+								_("Autocomplete locationbar"),
+								_("If true this extension will autocomplete known domains in locationbar."),
+								FALSE,
+								G_PARAM_READWRITE | G_PARAM_CONSTRUCT);
+
 	g_object_class_install_properties(gobjectClass, PROP_LAST, InterfaceTweaksProperties);
 }
 
@@ -801,9 +1277,11 @@ static void interface_tweaks_init(InterfaceTweaks *self)
 	priv->hideCloseOnMinimizedTabs=FALSE;
 	priv->showStartRequestThrobber=FALSE;
 	priv->smallToolbar=FALSE;
+	priv->autocompleteLocationbar=FALSE;
 
 	priv->originToolbarIconSize=GTK_ICON_SIZE_INVALID;
 	priv->originToolbarStyle=GTK_TOOLBAR_BOTH;
+	priv->historyDb=NULL;
 }
 
 /* Implementation: Public API */

@@ -41,6 +41,9 @@ static void _interface_tweaks_preferences_show_throbber_on_request_starting_chan
 static void _interface_tweaks_preferences_manager_small_toolbar_changed(InterfaceTweaksPreferences *self,GParamSpec *inSpec, gpointer inUserData);
 static void _interface_tweaks_preferences_small_toolbar_changed(InterfaceTweaksPreferences *self, gpointer inUserData);
 
+static void _interface_tweaks_preferences_manager_autocomplete_locationbar_changed(InterfaceTweaksPreferences *self,GParamSpec *inSpec, gpointer inUserData);
+static void _interface_tweaks_preferences_autocomplete_locationbar_changed(InterfaceTweaksPreferences *self, gpointer inUserData);
+
 /* Private structure - access only by public API if needed */
 #define INTERFACE_TWEAKS_PREFERENCES_GET_PRIVATE(obj) \
 	(G_TYPE_INSTANCE_GET_PRIVATE((obj), TYPE_INTERFACE_TWEAKS_PREFERENCES, InterfaceTweaksPreferencesPrivate))
@@ -48,14 +51,15 @@ static void _interface_tweaks_preferences_small_toolbar_changed(InterfaceTweaksP
 struct _InterfaceTweaksPreferencesPrivate
 {
 	/* Extension related */
-	InterfaceTweaks			*manager;
+	InterfaceTweaks		*manager;
 
 	/* Dialog related */
-	GtkWidget				*contentArea;
-	GtkWidget				*checkboxGroupMinimizedTabs;
-	GtkWidget				*checkboxHideCloseOnMinimizedTabs;
-	GtkWidget				*checkboxShowThrobberOnRequestStarting;
-	GtkWidget				*checkboxSmallToolbar;
+	GtkWidget			*contentArea;
+	GtkWidget			*checkboxGroupMinimizedTabs;
+	GtkWidget			*checkboxHideCloseOnMinimizedTabs;
+	GtkWidget			*checkboxShowThrobberOnRequestStarting;
+	GtkWidget			*checkboxSmallToolbar;
+	GtkWidget			*checkboxAutocompleteLocationbar;
 };
 
 /* IMPLEMENTATION: Private variables and methods */
@@ -220,6 +224,45 @@ static void _interface_tweaks_preferences_small_toolbar_changed(InterfaceTweaksP
 										self);
 }
 
+/* "autocomplete-locationbar" in manager changed or check-box changed */
+static void _interface_tweaks_preferences_manager_autocomplete_locationbar_changed(InterfaceTweaksPreferences *self,
+																					GParamSpec *inSpec,
+																					gpointer inUserData)
+{
+	InterfaceTweaksPreferencesPrivate	*priv=self->priv;
+	InterfaceTweaks						*manager=INTERFACE_TWEAKS(inUserData);
+	gboolean							state;
+
+	/* Set toogle in widget (but block signal for toggle) */
+	g_signal_handlers_block_by_func(priv->checkboxAutocompleteLocationbar,
+										G_CALLBACK(_interface_tweaks_preferences_autocomplete_locationbar_changed),
+										self);
+	
+	g_object_get(manager, "autocomplete-locationbar", &state, NULL);
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(priv->checkboxAutocompleteLocationbar), state);
+	
+	g_signal_handlers_unblock_by_func(priv->checkboxAutocompleteLocationbar,
+										G_CALLBACK(_interface_tweaks_preferences_autocomplete_locationbar_changed),
+										self);
+}
+
+static void _interface_tweaks_preferences_autocomplete_locationbar_changed(InterfaceTweaksPreferences *self, gpointer inUserData)
+{
+	InterfaceTweaksPreferencesPrivate	*priv=self->priv;
+	gboolean							state;
+
+	/* Get toogle state of widget (but block signal for manager) and set in manager */
+	g_signal_handlers_block_by_func(priv->manager,
+										G_CALLBACK(_interface_tweaks_preferences_manager_autocomplete_locationbar_changed),
+										self);
+	
+	state=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(priv->checkboxAutocompleteLocationbar));
+	g_object_set(priv->manager, "autocomplete-locationbar", state, NULL);
+	
+	g_signal_handlers_unblock_by_func(priv->manager,
+										G_CALLBACK(_interface_tweaks_preferences_manager_autocomplete_locationbar_changed),
+										self);
+}
 
 /* IMPLEMENTATION: GObject */
 
@@ -294,6 +337,12 @@ static void interface_tweaks_preferences_set_property(GObject *inObject,
 											G_CALLBACK(_interface_tweaks_preferences_manager_small_toolbar_changed),
 											self);
 				_interface_tweaks_preferences_manager_small_toolbar_changed(self, NULL, priv->manager);
+
+				g_signal_connect_swapped(priv->manager,
+											"notify::autocomplete-locationbar",
+											G_CALLBACK(_interface_tweaks_preferences_manager_autocomplete_locationbar_changed),
+											self);
+				_interface_tweaks_preferences_manager_autocomplete_locationbar_changed(self, NULL, priv->manager);
 			}
 			break;
 
@@ -418,6 +467,14 @@ static void interface_tweaks_preferences_init(InterfaceTweaksPreferences *self)
 								G_CALLBACK(_interface_tweaks_preferences_small_toolbar_changed),
 								self);
 	gtk_box_pack_start(GTK_BOX(vbox), priv->checkboxSmallToolbar, TRUE, TRUE, 5);
+
+	/* Add "autocomplete-locationbar" checkbox */
+	priv->checkboxAutocompleteLocationbar=gtk_check_button_new_with_mnemonic(_("Autocomplete URIs in _location-bar"));
+	g_signal_connect_swapped(priv->checkboxAutocompleteLocationbar,
+								"toggled",
+								G_CALLBACK(_interface_tweaks_preferences_autocomplete_locationbar_changed),
+								self);
+	gtk_box_pack_start(GTK_BOX(vbox), priv->checkboxAutocompleteLocationbar, TRUE, TRUE, 5);
 
 	/* Finalize setup of content area */
 	gtk_container_add(GTK_CONTAINER(priv->contentArea), vbox);
