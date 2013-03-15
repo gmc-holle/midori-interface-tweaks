@@ -313,23 +313,23 @@ static void _interface_tweaks_add_uri_to_completion_model(InterfaceTweaks *self,
 
 	/* Add URI with scheme and host to completion */
 	modelURI=g_strdup_printf("%s://%s", soup_uri_get_scheme(soupURI), soup_uri_get_host(soupURI));
-	if(g_hash_table_lookup(priv->completionModelDomains, modelURI)==NULL)
+	if(modelURI && g_hash_table_lookup(priv->completionModelDomains, modelURI)==NULL)
 	{
 		gtk_list_store_append(priv->completionModel, &iter);
 		gtk_list_store_set(priv->completionModel, &iter, 0, modelURI, -1);
 		g_hash_table_insert(priv->completionModelDomains, modelURI, GINT_TO_POINTER(TRUE));
 	}
-	g_free(modelURI);
+	if(modelURI) g_free(modelURI);
 
 	/* Add URI without scheme - only host - to completion */
 	modelURI=g_strdup(soup_uri_get_host(soupURI));
-	if(g_hash_table_lookup(priv->completionModelDomains, modelURI)==NULL)
+	if(modelURI && g_hash_table_lookup(priv->completionModelDomains, modelURI)==NULL)
 	{
 		gtk_list_store_append(priv->completionModel, &iter);
 		gtk_list_store_set(priv->completionModel, &iter, 0, modelURI, -1);
 		g_hash_table_insert(priv->completionModelDomains, modelURI, GINT_TO_POINTER(TRUE));
 	}
-	g_free(modelURI);
+	if(modelURI) g_free(modelURI);
 
 	/* Release allocated resources */
 	soup_uri_free(soupURI);
