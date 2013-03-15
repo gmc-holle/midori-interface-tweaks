@@ -57,10 +57,12 @@ struct _InterfaceTweaksPrivate
 	/* Initialization state */
 	gboolean			inited;
 
-	/* Additional values */
+	/* Additional data */
 	GtkIconSize			originToolbarIconSize;
 	GtkToolbarStyle		originToolbarStyle;
-	sqlite3				*historyDb;
+
+	GtkListStore		*completionModel;
+	GHashTable			*completionModelDomains;
 };
 
 typedef struct
@@ -294,7 +296,46 @@ static KatzeThrobber* _interface_tweaks_find_view_throbber(MidoriView *inView)
 	return(throbber);
 }
 
-/* Autocompleten in locationbar has found a match */
+/* Add an URI to completion model for autocompletion */
+static void _interface_tweaks_add_uri_to_completion_model(InterfaceTweaks *self, const gchar *inURI)
+{
+	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
+	g_return_if_fail(inURI!=NULL);
+
+	InterfaceTweaksPrivate	*priv=self->priv;
+	SoupURI					*soupURI;
+	gchar					*modelURI;
+	GtkTreeIter				iter;
+
+	/* Create SoupURI from URI to retrieve host and/or scheme for completion */
+	soupURI=soup_uri_new(inURI);
+	g_return_if_fail(soupURI!=NULL);
+
+	/* Add URI with scheme and host to completion */
+	modelURI=g_strdup_printf("%s://%s", soup_uri_get_scheme(soupURI), soup_uri_get_host(soupURI));
+	if(g_hash_table_lookup(priv->completionModelDomains, modelURI)==NULL)
+	{
+		gtk_list_store_append(priv->completionModel, &iter);
+		gtk_list_store_set(priv->completionModel, &iter, 0, modelURI, -1);
+		g_hash_table_insert(priv->completionModelDomains, modelURI, GINT_TO_POINTER(TRUE));
+	}
+	g_free(modelURI);
+
+	/* Add URI without scheme - only host - to completion */
+	modelURI=g_strdup(soup_uri_get_host(soupURI));
+	if(g_hash_table_lookup(priv->completionModelDomains, modelURI)==NULL)
+	{
+		gtk_list_store_append(priv->completionModel, &iter);
+		gtk_list_store_set(priv->completionModel, &iter, 0, modelURI, -1);
+		g_hash_table_insert(priv->completionModelDomains, modelURI, GINT_TO_POINTER(TRUE));
+	}
+	g_free(modelURI);
+
+	/* Release allocated resources */
+	soup_uri_free(soupURI);
+}
+
+/* Autocompletion in locationbar has found a match */
 static gboolean _interface_tweaks_on_insert_prefix(InterfaceTweaks *self,
 													gchar *inPrefix,
 													gpointer inUserData)
@@ -417,111 +458,6 @@ static void _interface_tweaks_on_destroyed(InterfaceTweaks *self, gpointer inUse
 	}
 }
 
-/* The locationbar entry got focus */
-static void _interface_tweaks_on_activate(InterfaceTweaks *self, GdkEvent *inEvent, gpointer inUserData)
-{
-	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
-	g_return_if_fail(GTK_IS_ENTRY(inUserData));
-
-	InterfaceTweaksPrivate	*priv=self->priv;
-	GtkEntry				*entry=GTK_ENTRY(inUserData);
-	GtkEntryCompletion		*completion;
-	GtkListStore			*model;
-	sqlite3_stmt			*statement=NULL;
-	gint					success;
-	guint					keyPressSignalID;
-	gulong					hookID;
-
-	/* Get completion of entry */
-	completion=gtk_entry_get_completion(entry);
-	if(completion && priv->historyDb)
-	{
-		/* Get model of completion */
-		model=GTK_LIST_STORE(gtk_entry_completion_get_model(completion));
-
-		/* Clear model if available ... */
-		if(model) gtk_list_store_clear(model);
-			/* ... otherwise create new model */
-			else
-			{
-				model=gtk_list_store_new(1, G_TYPE_STRING);
-				gtk_entry_completion_set_model(completion, GTK_TREE_MODEL(model));
-				gtk_entry_completion_set_text_column(completion, 0);
-			}
-
-		/* Fill model with history data */
-		success=sqlite3_prepare_v2(priv->historyDb,
-									"SELECT uri FROM history GROUP BY uri ORDER BY date,uri;", /* Found row should also contain highest date so no ORDER BY */
-									-1,
-									&statement,
-									NULL);
-		if(statement && success==SQLITE_OK)
-		{
-			gchar			*dbURI, *modelURI;
-			GtkTreeIter		iter;
-			SoupURI			*soupURI;
-			GHashTable		*domains;
-
-			/* Create hash-table for URIs to keep track which URIs are added to
-			 * completion list already to avoid duplicates
-			 */
-			domains=g_hash_table_new(g_str_hash, g_str_equal);
-			if(domains)
-			{
-				/* Iterate through URIs found in database by the query above */
-				while(sqlite3_step(statement)==SQLITE_ROW)
-				{
-					/* Get URI from database */
-					dbURI=(gchar*)sqlite3_column_text(statement, 0);
-
-					/* Create SoupURI from URI to retrieve host and/or scheme for completion */
-					soupURI=soup_uri_new(dbURI);
-
-					/* Add URI with scheme and host to completion */
-					modelURI=g_strdup_printf("%s://%s", soup_uri_get_scheme(soupURI), soup_uri_get_host(soupURI));
-					if(g_hash_table_lookup(domains, modelURI)==NULL)
-					{
-						gtk_list_store_append(model, &iter);
-						gtk_list_store_set(model, &iter, 0, modelURI, -1);
-						g_hash_table_insert(domains, modelURI, GINT_TO_POINTER(TRUE));
-					}
-					g_free(modelURI);
-
-					/* Add URI without scheme - only host - to completion */
-					modelURI=g_strdup(soup_uri_get_host(soupURI));
-					if(g_hash_table_lookup(domains, modelURI)==NULL)
-					{
-						gtk_list_store_append(model, &iter);
-						gtk_list_store_set(model, &iter, 0, modelURI, -1);
-						g_hash_table_insert(domains, modelURI, GINT_TO_POINTER(TRUE));
-					}
-					g_free(modelURI);
-
-					/* Release allocated resources */
-					soup_uri_free(soupURI);
-				}
-
-				/* Release allocated resources */
-				g_hash_table_destroy(domains);
-			}
-		}
-			else g_warning(_("Could not fetch history from database: %s"), sqlite3_errmsg(priv->historyDb));
-
-		sqlite3_finalize(statement);
-	}
-
-	/* Add emission handler to entry if it does not exist to ensure that
-	 * our "key-press-event" handler gets called first
-	 */
-	hookID=GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(entry), "interface-tweaks-hook-id"));
-	if(hookID==0)
-	{
-		keyPressSignalID=g_signal_lookup("key-press-event", GTK_TYPE_ENTRY);
-		hookID=g_signal_add_emission_hook(keyPressSignalID, 0, _interface_tweaks_on_key_press_event, entry, NULL);
-		g_object_set_data(G_OBJECT(entry), "interface-tweaks-hook-id", GSIZE_TO_POINTER(hookID)) ;
-	}
-}
-
 /* A tab was minimized (pinned) or maximized (unpinned) - Check for grouping tabs */
 static void _interface_tweaks_on_notify_minimized_tab_for_group_tabs(InterfaceTweaks *self, GParamSpec *inSpec, gpointer inUserData)
 {
@@ -624,6 +560,8 @@ static void _interface_tweaks_on_notify_view_load_status(InterfaceTweaks *self, 
 
 	/* Check load status */ 
 	status=webkit_web_view_get_load_status(webkitView);
+
+	/* If webview was prepared to start network request */
 	if(status==WEBKIT_LOAD_PROVISIONAL)
 	{
 		/* Show start-request throbber now if set */
@@ -639,6 +577,20 @@ static void _interface_tweaks_on_notify_view_load_status(InterfaceTweaks *self, 
 			throbber=_interface_tweaks_find_view_throbber(view);
 			if(throbber) katze_throbber_set_animated(throbber, TRUE);
 		}
+	}
+
+	/* First data of network response has been sent or first data of
+	 * network response has been received
+	 */
+	if(status==WEBKIT_LOAD_COMMITTED)
+	{
+		const gchar			*uri;
+
+		/* Get URI for current request */
+		uri=webkit_web_view_get_uri(webkitView);
+
+		/* Add URI to completion model */
+		_interface_tweaks_add_uri_to_completion_model(self, uri);
 	}
 }
 
@@ -718,10 +670,13 @@ static void _interface_tweaks_on_add_browser(InterfaceTweaks *self, MidoriBrowse
 	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
 	g_return_if_fail(MIDORI_IS_BROWSER(inBrowser));
 
+	InterfaceTweaksPrivate				*priv=self->priv;
 	GtkNotebook							*notebook;
 	GList								*tabs, *iter;
 	InterfaceTweaksLocationbarLookup	locationbar;
 	GtkEntryCompletion					*completion;
+	guint								keyPressSignalID;
+	gulong								hookID;
 
 	/* Set up all current available tabs in browser */
 	tabs=midori_browser_get_tabs(inBrowser);
@@ -752,11 +707,24 @@ static void _interface_tweaks_on_add_browser(InterfaceTweaks *self, MidoriBrowse
 		gtk_entry_completion_set_inline_completion(completion, TRUE);
 		gtk_entry_completion_set_inline_selection(completion, FALSE);
 		gtk_entry_completion_set_popup_completion(completion, FALSE);
+		gtk_entry_completion_set_model(completion, GTK_TREE_MODEL(priv->completionModel));
+		gtk_entry_completion_set_text_column(completion, 0);
 		gtk_entry_set_completion(GTK_ENTRY(locationbar.widget), completion);
 		g_signal_connect_swapped(completion, "insert-prefix", G_CALLBACK(_interface_tweaks_on_insert_prefix), self);
 		g_object_unref(completion);
 
-		g_signal_connect_swapped(locationbar.widget, "focus-in-event", G_CALLBACK(_interface_tweaks_on_activate), self);
+		/* Add emission handler to entry if it does not exist to ensure that
+		 * our "key-press-event" handler gets called first
+		 */
+		hookID=GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(locationbar.widget), "interface-tweaks-hook-id"));
+		if(hookID==0)
+		{
+			keyPressSignalID=g_signal_lookup("key-press-event", GTK_TYPE_ENTRY);
+			hookID=g_signal_add_emission_hook(keyPressSignalID, 0, _interface_tweaks_on_key_press_event, locationbar.widget, NULL);
+			g_object_set_data(G_OBJECT(locationbar.widget), "interface-tweaks-hook-id", GSIZE_TO_POINTER(hookID)) ;
+		}
+
+		/* Add signal to recognize widget destruction to release emission hook */
 		g_signal_connect_swapped(locationbar.widget, "destroy", G_CALLBACK(_interface_tweaks_on_destroyed), self);
 	}
 }
@@ -946,7 +914,7 @@ static void _interface_tweaks_on_autocomplete_locationbar_changed(InterfaceTweak
 static void _interface_tweaks_on_application_changed(InterfaceTweaks *self, MidoriApp *inApplication)
 {
 	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
-	g_return_if_fail(MIDORI_IS_APP(inApplication));
+	g_return_if_fail(inApplication==NULL || MIDORI_IS_APP(inApplication));
 
 	InterfaceTweaksPrivate				*priv=INTERFACE_TWEAKS(self)->priv;
 	GtkNotebook							*notebook;
@@ -1042,21 +1010,18 @@ static void _interface_tweaks_on_application_changed(InterfaceTweaks *self, Mido
 static void _interface_tweaks_on_extension_changed(InterfaceTweaks *self, MidoriExtension *inExtension)
 {
 	g_return_if_fail(IS_INTERFACE_TWEAKS(self));
-	g_return_if_fail(MIDORI_IS_EXTENSION(inExtension));
+	g_return_if_fail(inExtension==NULL || MIDORI_IS_EXTENSION(inExtension));
 
 	InterfaceTweaksPrivate	*priv=INTERFACE_TWEAKS(self)->priv;
-	gboolean				dbSuccess;
 	gchar					*dbFilename;
+	gint					dbSuccess;
+	sqlite3					*dbHandle;
+	sqlite3_stmt			*dbStatement;
+	gchar					*dbURI;
 
 	/* Release resources on current extension object */
 	if(priv->extension)
 	{
-		if(priv->historyDb)
-		{
-			sqlite3_close(priv->historyDb);
-			priv->historyDb=NULL;
-		}
-
 		g_object_unref(priv->extension);
 		priv->extension=NULL;
 	}
@@ -1065,19 +1030,43 @@ static void _interface_tweaks_on_extension_changed(InterfaceTweaks *self, Midori
 	if(!inExtension) return;
 	priv->extension=g_object_ref(inExtension);
 
-	/* Open history database */
-	dbFilename=midori_paths_get_config_filename_for_writing(HISTORY_DATABASE_FILENAME);
-	if(dbFilename)
+	/* Clear completion model and fill model from history database */
+	if(priv->completionModel)
 	{
-		dbSuccess=sqlite3_open_v2(dbFilename, &priv->historyDb, SQLITE_OPEN_READONLY, NULL);
-		if(dbSuccess!=SQLITE_OK)
-		{
-			g_warning(_("Could not open history database: %s"), sqlite3_errmsg(priv->historyDb));
+		gtk_list_store_clear(priv->completionModel);
 
-			if(priv->historyDb) sqlite3_close(priv->historyDb);
-			priv->historyDb=NULL;
+		dbFilename=midori_paths_get_config_filename_for_writing(HISTORY_DATABASE_FILENAME);
+		if(dbFilename)
+		{
+			dbSuccess=sqlite3_open_v2(dbFilename, &dbHandle, SQLITE_OPEN_READONLY, NULL);
+			if(dbSuccess==SQLITE_OK)
+			{
+				dbStatement=NULL;
+				dbSuccess=sqlite3_prepare_v2(dbHandle,
+												"SELECT uri FROM history GROUP BY uri ORDER BY date,uri;", /* Found row should also contain highest date so no ORDER BY */
+												-1,
+												&dbStatement,
+												NULL);
+				if(dbStatement && dbSuccess==SQLITE_OK)
+				{
+					/* Iterate through URIs found in database by the query above */
+					while(sqlite3_step(dbStatement)==SQLITE_ROW)
+					{
+						/* Get URI from database */
+						dbURI=(gchar*)sqlite3_column_text(dbStatement, 0);
+
+						/* Add to completion model */
+						_interface_tweaks_add_uri_to_completion_model(self, dbURI);
+					}
+				}
+					else g_warning(_("Could not fetch history from database: %s"), sqlite3_errmsg(dbHandle));
+
+				sqlite3_finalize(dbStatement);
+			}
+
+			sqlite3_close(dbHandle);
+			g_free(dbFilename);
 		}
-		g_free(dbFilename);
 	}
 
 	/* Notify about property change */
@@ -1099,6 +1088,18 @@ static void interface_tweaks_finalize(GObject *inObject)
 	_interface_tweaks_on_autocomplete_locationbar_changed(self, FALSE);
 	_interface_tweaks_on_application_changed(self, NULL);
 	_interface_tweaks_on_extension_changed(self, NULL);
+
+	if(self->priv->completionModel)
+	{
+		g_object_unref(self->priv->completionModel);
+		self->priv->completionModel=NULL;
+	}
+
+	if(self->priv->completionModelDomains)
+	{
+		g_hash_table_destroy(self->priv->completionModelDomains);
+		self->priv->completionModelDomains=NULL;
+	}
 
 	/* Call parent's class finalize method */
 	G_OBJECT_CLASS(interface_tweaks_parent_class)->finalize(inObject);
@@ -1281,7 +1282,9 @@ static void interface_tweaks_init(InterfaceTweaks *self)
 
 	priv->originToolbarIconSize=GTK_ICON_SIZE_INVALID;
 	priv->originToolbarStyle=GTK_TOOLBAR_BOTH;
-	priv->historyDb=NULL;
+
+	priv->completionModel=gtk_list_store_new(1, G_TYPE_STRING);
+	priv->completionModelDomains=g_hash_table_new(g_str_hash, g_str_equal);
 }
 
 /* Implementation: Public API */
